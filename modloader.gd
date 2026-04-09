@@ -178,7 +178,7 @@ func _show_menu_button() -> void:
             if _is_dangerous_path(res_path) or res_path == _database_path:
                 critical_count += 1
 
-    var btn_text: String = "Metro Mod Loader"
+    var btn_text: String = "RTV Mod Loader"
     var warnings: Array[String] = []
     if failed_count > 0:
         warnings.append(str(failed_count) + " failed")
