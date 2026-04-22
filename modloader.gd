@@ -10,6 +10,8 @@ const MODWORKSHOP_MODS_URL := "https://api.modworkshop.net/games/864/mods"
 const BROWSE_CACHE_PATH := "user://modloader_browse_cache.json"
 const BROWSE_CACHE_MAX_AGE := 3600  # 1 hour in seconds
 
+const PATH_MODLOADER_UI: NodePath = ^"ModLoaderUI"
+
 const VANILLA_SCAN_DIRS: Array[String] = ["res://Scripts", "res://Scenes"]
 const TRACKED_EXTENSIONS: Array[String] = ["gd", "tscn", "tres", "gdns", "gdnlib", "scn"]
 const LIFECYCLE_METHODS: Array[String] = [
@@ -316,9 +318,17 @@ func _show_menu_button() -> void:
     root.add_child(panel)
     btn.pressed.connect(func(): panel.visible = not panel.visible)
 
+    # Re-fetch the canvas via its unique node name each time the lambda
+    # fires. Capturing the local [code]canvas[/code] ref directly leaves a
+    # dangling capture after [method Node.queue_free] — Godot then logs
+    # "Lambda capture at index 0 was freed" on every subsequent
+    # [signal SceneTree.node_added] emission (i.e. every [method Node.add_child]
+    # anywhere in the scene).
     get_tree().node_added.connect(func(node: Node):
-        if node == get_tree().current_scene and is_instance_valid(canvas):
-            canvas.queue_free()
+        if node == get_tree().current_scene:
+            var c: Node = get_node_or_null(PATH_MODLOADER_UI)
+            if is_instance_valid(c):
+                c.queue_free()
     )
 
 
@@ -369,7 +379,7 @@ func _build_detail_bbcode() -> String:
 
 
 func _append_detail_bbcode(bbcode_text: String) -> void:
-    var canvas: Node = get_node_or_null("ModLoaderUI")
+    var canvas: Node = get_node_or_null(PATH_MODLOADER_UI)
     if canvas == null:
         return
     var label: RichTextLabel = canvas.get_meta("detail_label", null)
@@ -545,7 +555,6 @@ func _check_updates_for_ui(status_info: Dictionary, check_btn: Button) -> void:
             dl_btn.mouse_filter = Control.MOUSE_FILTER_STOP
             var full_path: String = si["full_path"]
             var mw_id: int = si["mw_id"]
-            var mod_name: String = si["mod_name"]
             var new_ver: String = str(latest_v)
             for c in dl_btn.pressed.get_connections():
                 dl_btn.pressed.disconnect(c["callable"])
