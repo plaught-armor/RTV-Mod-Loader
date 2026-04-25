@@ -21,3 +21,26 @@ jobs:
             modloader.gd
             override.cfg
           generate_release_notes: true
+
+      - name: Notify RTV-Coop to refresh setup bundle
+        # Fires after release publishes. Triggers RTV-Coop's bundle-setup.yml
+        # which re-zips the setup bundle on the latest mod release using THIS
+        # ML tag. Only the .zip is replaced; the .vmz stays untouched.
+        #
+        # client_payload pins ml_tag so the bundle records the exact ML
+        # version (stamped into VERSIONS.txt). mod_tag stays blank → bundle
+        # workflow resolves to latest published mod release.
+        #
+        # Requires repo secret MOD_REPO_DISPATCH_TOKEN — a PAT with
+        # `repo` scope on plaught-armor/RTV-Coop. If missing, step is
+        # skipped (release still publishes, bundle just won't auto-refresh).
+        if: ${{ env.HAS_DISPATCH_TOKEN == 'true' }}
+        env:
+          HAS_DISPATCH_TOKEN: ${{ secrets.MOD_REPO_DISPATCH_TOKEN != '' }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.MOD_REPO_DISPATCH_TOKEN }}
+          repository: plaught-armor/RTV-Coop
+          event-type: ml-released
+          client-payload: |
+            {"ml_tag": "${{ github.ref_name }}"}
