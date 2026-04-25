@@ -25,16 +25,16 @@ const LIFECYCLE_METHODS: Array[String] = [
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
-var _vanilla_paths: Dictionary = { }
+var _vanilla_paths: Dictionary = {}
 var _database_path: String = ""
 var _database_replaced_by: String = ""
-var override_registry: Dictionary = { }
-var _mod_script_analysis: Dictionary = { }
-var _archive_file_sets: Dictionary = { }
+var override_registry: Dictionary = {}
+var _mod_script_analysis: Dictionary = {}
+var _archive_file_sets: Dictionary = {}
 var _report_lines: Array[String] = []
 var pending_autoloads: Array[Dictionary] = []
-var loaded_mod_ids: Dictionary = { }
-var registered_autoload_names: Dictionary = { }
+var loaded_mod_ids: Dictionary = {}
+var registered_autoload_names: Dictionary = {}
 var _ui_mod_entries: Array[Dictionary] = []
 var _re_take_over: RegEx
 var _re_extends: RegEx
@@ -42,8 +42,8 @@ var _re_func: RegEx
 
 # Browse tab state
 var _browse_all_mods: Array[Dictionary] = []
-var _browse_installed_ids: Dictionary = { }
-var _browse_active_tags: Dictionary = { }
+var _browse_installed_ids: Dictionary = {}
+var _browse_active_tags: Dictionary = {}
 var _browse_current_page: int = 1
 var _browse_list: VBoxContainer
 var _browse_search: LineEdit
@@ -57,6 +57,32 @@ var _browse_tag_flow: HBoxContainer
 var _installed_list: VBoxContainer
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
+#
+# Boot sequence (production .vmz):
+#   1. Engine reads project.godot + override.cfg → registers autoloads
+#   2. Project autoloads load (Loader, Database, Simulation, ...)
+#   3. override.cfg autoloads load LAST (us — RTVModLoader)
+#   4. Our _enter_tree fires: pack-mount + metadata only (root busy = add_child fails)
+#   5. Our _ready fires: queues _deferred_init
+#   6. Main scene loads + runs vanilla _ready
+#   7. Idle frame: _deferred_init runs → instantiate + add_child + register_singleton
+#
+# Mod scripts cannot bare-reference mod autoload identifiers. Verified empirically
+# 2026-04-25: neither Engine.register_singleton nor ProjectSettings.set_setting at
+# runtime makes the GDScript parser resolve bare identifiers — parser reads autoload
+# registry only once at engine init. Mods must use shadow var pattern:
+#   var X: Node = (Engine.get_main_loop() as SceneTree).root.get_node_or_null(^"/root/X")
+
+
+func _enter_tree() -> void:
+    # Pack-mount + metadata collection only. add_child to /root from autoload
+    # _enter_tree fails ("parent busy setting up children") — instantiation
+    # deferred to _deferred_init.
+    _compile_regex()
+    _ui_mod_entries = _collect_mod_metadata()
+    _load_ui_config()
+    _clean_vmz_cache()
+    _load_all_mods()
 
 
 func _ready() -> void:
@@ -64,17 +90,21 @@ func _ready() -> void:
 
 
 func _deferred_init() -> void:
-    _compile_regex()
-    _ui_mod_entries = _collect_mod_metadata()
-    _load_ui_config()
-    _clean_vmz_cache()
-    _load_all_mods()
-    for entry in pending_autoloads:
-        _instantiate_autoload(entry["mod_name"], entry["name"], entry["path"])
+    # Idle frame after engine init — root stable, sync add_child OK.
+    for entry: Dictionary in pending_autoloads:
+        _instantiate_autoload_safe(entry)
     _print_conflict_summary()
     _write_conflict_report()
     _show_menu_button()
     _check_updates_background()
+
+
+func _notification(what: int) -> void:
+    if what == NOTIFICATION_PREDELETE:
+        # Unregister mod singletons so Godot doesn't complain on shutdown.
+        for sname: String in registered_autoload_names:
+            if Engine.has_singleton(sname):
+                Engine.unregister_singleton(sname)
 
 
 func _clean_vmz_cache() -> void:
@@ -110,7 +140,7 @@ func _collect_mod_metadata() -> Array[Dictionary]:
     var dir: DirAccess = DirAccess.open(mods_dir)
     if dir == null:
         return entries
-    var seen: Dictionary = { }
+    var seen: Dictionary = {}
     dir.list_dir_begin()
     while true:
         var file_name: String = dir.get_next()
@@ -157,7 +187,7 @@ func _load_ui_config() -> void:
     var cfg: ConfigFile = ConfigFile.new()
     if cfg.load(UI_CONFIG_PATH) != OK:
         return
-    for entry in _ui_mod_entries:
+    for entry: Dictionary in _ui_mod_entries:
         var fn: String = entry["file_name"]
         entry["enabled"] = bool(cfg.get_value("enabled", fn, true))
         if cfg.has_section_key("priority", fn):
@@ -170,7 +200,7 @@ func _show_menu_button() -> void:
     var failed_count: int = 0
     var critical_count: int = 0
     var conflict_count: int = 0
-    for line in _report_lines:
+    for line: String in _report_lines:
         if "[Critical] Failed to mount:" in line:
             failed_count += 1
     for res_path: String in override_registry:
@@ -335,14 +365,14 @@ func _show_menu_button() -> void:
 func _build_detail_bbcode() -> String:
     var lines: Array[String] = []
     var enabled_count: int = 0
-    for entry in _ui_mod_entries:
+    for entry: Dictionary in _ui_mod_entries:
         if entry["enabled"]:
             enabled_count += 1
     if enabled_count == 0:
         lines.append("[color=#888888]No mods loaded.[/color]")
     else:
         lines.append("[color=#94d264]" + str(enabled_count) + " mod(s) loaded[/color]")
-        for entry in _ui_mod_entries:
+        for entry: Dictionary in _ui_mod_entries:
             if entry["enabled"]:
                 var ver: String = ""
                 if entry["cfg"] != null:
@@ -365,12 +395,12 @@ func _build_detail_bbcode() -> String:
         lines.append("[color=#d4b330]" + str(conflict_count) + " resource conflict(s)[/color]")
 
     var failed: Array[String] = []
-    for line in _report_lines:
+    for line: String in _report_lines:
         if "[Critical] Failed to mount:" in line:
             failed.append(line.split("Failed to mount: ")[1])
     if not failed.is_empty():
         lines.append("")
-        for f in failed:
+        for f: String in failed:
             lines.append("[color=#d94444]Failed to mount: " + f + "[/color]")
 
     lines.append("")
@@ -418,9 +448,9 @@ func _build_updates_tab() -> Control:
     scroll.add_child(list)
     _installed_list = list
 
-    var status_info: Dictionary = { }
+    var status_info: Dictionary = {}
 
-    for entry in _ui_mod_entries:
+    for entry: Dictionary in _ui_mod_entries:
         var cfg: ConfigFile = entry["cfg"]
         if cfg == null:
             continue
@@ -507,7 +537,7 @@ func _build_updates_tab() -> Control:
         func():
             check_btn.disabled = true
             check_btn.text = "Checking..."
-            for fn in status_info:
+            for fn: String in status_info:
                 var si: Dictionary = status_info[fn]
                 (si["label"] as Label).text = "checking..."
                 (si["label"] as Label).modulate = Color(1.0, 1.0, 1.0)
@@ -526,7 +556,7 @@ func _build_updates_tab() -> Control:
 
 func _check_updates_for_ui(status_info: Dictionary, check_btn: Button) -> void:
     var ids: Array[int] = []
-    for fn in status_info:
+    for fn: String in status_info:
         ids.append(status_info[fn]["mw_id"])
     if ids.is_empty():
         return
@@ -556,7 +586,7 @@ func _check_updates_for_ui(status_info: Dictionary, check_btn: Button) -> void:
             var full_path: String = si["full_path"]
             var mw_id: int = si["mw_id"]
             var new_ver: String = str(latest_v)
-            for c in dl_btn.pressed.get_connections():
+            for c: Dictionary in dl_btn.pressed.get_connections():
                 dl_btn.pressed.disconnect(c["callable"])
             dl_btn.pressed.connect(
                 func():
@@ -724,7 +754,7 @@ func _build_browse_tab() -> Control:
     _browse_load_btn = load_btn
     _browse_tag_flow = tag_flow
 
-    for entry in _ui_mod_entries:
+    for entry: Dictionary in _ui_mod_entries:
         if entry["cfg"] != null:
             var mw_str: String = str((entry["cfg"] as ConfigFile).get_value("updates", "modworkshop", ""))
             if mw_str != "" and mw_str != "0":
@@ -757,7 +787,7 @@ func _on_browse_load() -> void:
 func _browse_fetch_fresh() -> void:
     _browse_load_btn.disabled = true
     _browse_load_btn.text = "Loading..."
-    for child in _browse_list.get_children():
+    for child: Node in _browse_list.get_children():
         child.queue_free()
     var loading: Label = Label.new()
     loading.text = "Loading..."
@@ -802,7 +832,7 @@ func _load_browse_cache() -> bool:
     if not (parsed is Array):
         return false
     _browse_all_mods.clear()
-    for m in parsed:
+    for m: Variant in parsed:
         if m is Dictionary:
             _browse_all_mods.append(m)
     return not _browse_all_mods.is_empty()
@@ -858,24 +888,24 @@ func _fetch_browse_page(page: int) -> Dictionary:
     if parsed == null or not (parsed is Dictionary):
         return {}
     var data: Array = parsed.get("data", [])
-    for m in data:
+    for m: Variant in data:
         _browse_all_mods.append(m)
     var meta: Dictionary = parsed.get("meta", {})
     return {"last_page": int(meta.get("last_page", 1))}
 
 
 func _browse_render_list() -> void:
-    for child in _browse_list.get_children():
+    for child: Node in _browse_list.get_children():
         child.queue_free()
 
     var query: String = _browse_search.text.strip_edges().to_lower()
     var has_tag_filter: bool = not _browse_active_tags.is_empty()
     var filtered: Array[Dictionary] = []
-    for m in _browse_all_mods:
+    for m: Dictionary in _browse_all_mods:
         if has_tag_filter:
             var mod_tags: Array = m.get("tags", [])
             var matches_tag: bool = false
-            for tag in mod_tags:
+            for tag: Variant in mod_tags:
                 if tag is Dictionary and _browse_active_tags.has(int(tag.get("id", 0))):
                     matches_tag = true
                     break
@@ -894,13 +924,13 @@ func _browse_render_list() -> void:
 
     var sort_idx: int = _browse_sort.selected
     if sort_idx == 0:
-        filtered.sort_custom(func(a, b): return float(a.get("weekly_score", 0)) > float(b.get("weekly_score", 0)))
+        filtered.sort_custom(func(a: Dictionary, b: Dictionary): return float(a.get("weekly_score", 0)) > float(b.get("weekly_score", 0)))
     elif sort_idx == 1:
-        filtered.sort_custom(func(a, b): return int(a.get("downloads", 0)) > int(b.get("downloads", 0)))
+        filtered.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.get("downloads", 0)) > int(b.get("downloads", 0)))
     elif sort_idx == 2:
-        filtered.sort_custom(func(a, b): return str(a.get("published_at", "")) > str(b.get("published_at", "")))
+        filtered.sort_custom(func(a: Dictionary, b: Dictionary): return str(a.get("published_at", "")) > str(b.get("published_at", "")))
     elif sort_idx == 3:
-        filtered.sort_custom(func(a, b): return str(a.get("name", "")).to_lower() < str(b.get("name", "")).to_lower())
+        filtered.sort_custom(func(a: Dictionary, b: Dictionary): return str(a.get("name", "")).to_lower() < str(b.get("name", "")).to_lower())
 
     var per_page: int = 15
     var total: int = filtered.size()
@@ -922,7 +952,7 @@ func _browse_render_list() -> void:
         _browse_list.add_child(empty)
         return
 
-    for i in range(start, end):
+    for i: int in range(start, end):
         _browse_add_mod_row(filtered[i])
 
 
@@ -1028,7 +1058,7 @@ func _on_browse_install(btn: Button, mod_id: int, mod_name: String) -> void:
         btn.modulate = Color(0.9, 0.8, 0.3)
         var row: Node = btn.get_parent()
         var idx: int = row.get_index()
-        for w in warnings:
+        for w: String in warnings:
             var warn_lbl: Label = Label.new()
             warn_lbl.text = "  ⚠ " + w
             warn_lbl.add_theme_font_size_override("font_size", 10)
@@ -1158,7 +1188,7 @@ func _install_mod_from_browse(modworkshop_id: int, mod_name: String) -> Dictiona
 
     # Post-install conflict scan
     var warnings: Array[String] = _scan_archive_for_conflicts(target_path, mod_name)
-    for w in warnings:
+    for w: String in warnings:
         _log_warning("  " + w)
     return {"ok": true, "warnings": warnings, "path": target_path}
 
@@ -1180,23 +1210,23 @@ func _scan_archive_for_conflicts(archive_path: String, mod_name: String) -> Arra
         warnings.append("BAD ZIP: " + str(backslash_count) + " entries use Windows backslash paths. Re-pack with 7-Zip.")
 
     # Check for conflicts with already-loaded mods
-    for f in files:
+    for f: String in files:
         var res_path: String = _normalize_to_res_path(f)
         if res_path == "":
             continue
         if override_registry.has(res_path):
             var existing: Array = override_registry[res_path]
-            for claim in existing:
+            for claim: Dictionary in existing:
                 var cn: String = claim["mod_name"]
                 if cn != mod_name:
                     warnings.append("CONFLICT: " + res_path.get_file() + " — also claimed by " + cn)
 
     # Check GDScript for take_over_path conflicts
-    for f in files:
+    for f: String in files:
         if f.get_extension().to_lower() != "gd":
             continue
         var source: String = zr.read_file(f).get_string_from_utf8()
-        for m in _re_take_over.search_all(source):
+        for m: RegExMatch in _re_take_over.search_all(source):
             var path: String = m.get_string(1)
             # Check if any installed mod also takes over this path
             for existing_mod: String in _mod_script_analysis:
@@ -1232,7 +1262,7 @@ func _fetch_and_populate_tags() -> void:
         parsed = raw.get("data", [])
     if parsed.is_empty():
         return
-    for tag_data in parsed:
+    for tag_data: Variant in parsed:
         if not (tag_data is Dictionary):
             continue
         var tag_id: int = int(tag_data.get("id", 0))
@@ -1261,7 +1291,7 @@ func _on_browse_tag_toggled(on: bool, tag_id: int) -> void:
 
 func _check_updates_background() -> void:
     var update_entries: Array[Dictionary] = []
-    for entry in _ui_mod_entries:
+    for entry: Dictionary in _ui_mod_entries:
         var cfg: ConfigFile = entry["cfg"]
         if cfg == null:
             continue
@@ -1281,12 +1311,12 @@ func _check_updates_background() -> void:
         return
 
     var ids: Array[int] = []
-    for ue in update_entries:
+    for ue: Dictionary in update_entries:
         ids.append(ue["mw_id"])
     var latest: Dictionary = await _fetch_latest_modworkshop_versions(ids)
 
     var any_updates: bool = false
-    for ue in update_entries:
+    for ue: Dictionary in update_entries:
         var latest_v: Variant = latest.get(str(ue["mw_id"]), null)
         if latest_v == null:
             continue
@@ -1306,7 +1336,7 @@ func _check_updates_background() -> void:
         var update_lines: Array[String] = []
         update_lines.append("")
         update_lines.append("[color=#d4b330]Updates available[/color]")
-        for ue in update_entries:
+        for ue: Dictionary in update_entries:
             var lv: Variant = latest.get(str(ue["mw_id"]), null)
             if lv != null and _compare_versions(ue["version"], str(lv)) < 0:
                 update_lines.append(
@@ -1334,24 +1364,24 @@ func _load_all_mods() -> void:
     DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(TMP_DIR))
 
     var candidates: Array[Dictionary] = []
-    for entry in _ui_mod_entries:
+    for entry: Dictionary in _ui_mod_entries:
         if not entry["enabled"]:
             continue
         candidates.append(entry.duplicate())
-    candidates.sort_custom(func(a, b): return a["priority"] < b["priority"])
+    candidates.sort_custom(func(a: Dictionary, b: Dictionary): return a["priority"] < b["priority"])
 
     if candidates.is_empty():
         _log_info("No mods enabled.")
         return
 
     _log_info("=== Load Order ===")
-    for i in candidates.size():
+    for i: int in candidates.size():
         var c: Dictionary = candidates[i]
         var tag: String = " [priority=" + str(c["priority"]) + "]" if c["priority"] != 0 else ""
         _log_info("  [" + str(i + 1) + "] " + c["mod_name"] + " | " + c["file_name"] + tag)
     _log_info("==================")
 
-    for load_index in candidates.size():
+    for load_index: int in candidates.size():
         _process_mod_candidate(candidates[load_index], load_index)
 
 
@@ -1389,20 +1419,21 @@ func _process_mod_candidate(c: Dictionary, load_index: int) -> void:
         return
 
     var keys: PackedStringArray = cfg.get_section_keys("autoload")
-    for key in keys:
+    for key: String in keys:
         var autoload_name: String = str(key)
         var res_path: String = str(cfg.get_value("autoload", key))
 
         if registered_autoload_names.has(autoload_name):
             _log_warning("Duplicate autoload name '" + autoload_name + "' — skipped")
             continue
-        registered_autoload_names[autoload_name] = true
+        # Note: registered_autoload_names is now populated in _instantiate_autoload
+        # after Engine.register_singleton succeeds, not here.
 
         if _archive_file_sets.has(file_name) and not _archive_file_sets[file_name].has(res_path):
             _log_critical("  Autoload path not found in archive: " + res_path)
             _log_critical("    Declared in mod.txt but missing from: " + file_name)
 
-        pending_autoloads.append({ "mod_name": mod_name, "name": autoload_name, "path": res_path })
+        pending_autoloads.append({"mod_name": mod_name, "name": autoload_name, "path": res_path})
         _log_info("  Autoload queued: " + autoload_name + " -> " + res_path)
         _register_claim(res_path, mod_name, file_name, load_index, "autoload")
 
@@ -1439,7 +1470,7 @@ func _register_claim(
 ) -> void:
     if not override_registry.has(res_path):
         override_registry[res_path] = []
-    for existing in override_registry[res_path]:
+    for existing: Dictionary in override_registry[res_path]:
         if existing["mod_name"] == mod_name and existing["archive"] == archive:
             return
     override_registry[res_path].append(
@@ -1473,7 +1504,7 @@ func _classify_claim(res_path: String) -> String:
 func _scan_vanilla_paths() -> void:
     _vanilla_paths.clear()
     _database_path = ""
-    for dir_path in VANILLA_SCAN_DIRS:
+    for dir_path: String in VANILLA_SCAN_DIRS:
         _scan_vanilla_dir(dir_path)
     for path: String in _vanilla_paths:
         if path.get_extension().to_lower() == "gd" \
@@ -1534,7 +1565,7 @@ func _scan_and_register_archive_claims(
 
     var tracked_count: int = 0
     var dangerous_count: int = 0
-    var path_set: Dictionary = { }
+    var path_set: Dictionary = {}
     var gd_analysis: Dictionary = {
         "take_over_literal_paths": [],
         "extends_paths": [],
@@ -1544,7 +1575,7 @@ func _scan_and_register_archive_claims(
         "total_gd_files": 0,
     }
 
-    for f in files:
+    for f: String in files:
         if f.get_extension().to_lower() == "gd":
             gd_analysis["total_gd_files"] = gd_analysis["total_gd_files"] + 1
             _scan_gd_source(zr.read_file(f).get_string_from_utf8(), gd_analysis)
@@ -1605,7 +1636,7 @@ func _normalize_to_res_path(zip_path: String) -> String:
 
 
 func _scan_gd_source(text: String, analysis: Dictionary) -> void:
-    for m in _re_take_over.search_all(text):
+    for m: RegExMatch in _re_take_over.search_all(text):
         var path: String = m.get_string(1)
         if path not in (analysis["take_over_literal_paths"] as Array):
             (analysis["take_over_literal_paths"] as Array).append(path)
@@ -1628,7 +1659,7 @@ func _scan_gd_source(text: String, analysis: Dictionary) -> void:
     var extends_game_script: bool = m_ext != null and m_ext.get_string(1).begins_with("res://Scripts/")
     if extends_game_script:
         var func_matches: Array[RegExMatch] = _re_func.search_all(text)
-        for i in func_matches.size():
+        for i: int in func_matches.size():
             var func_name: String = func_matches[i].get_string(1)
             if func_name not in LIFECYCLE_METHODS:
                 continue
@@ -1645,9 +1676,9 @@ func _analyze_script_conflicts() -> void:
     if _mod_script_analysis.is_empty():
         return
 
-    var literal_claims: Dictionary = { }
+    var literal_claims: Dictionary = {}
     for mod_name: String in _mod_script_analysis:
-        for path in (_mod_script_analysis[mod_name]["take_over_literal_paths"] as Array):
+        for path: String in (_mod_script_analysis[mod_name]["take_over_literal_paths"] as Array):
             if not literal_claims.has(path):
                 literal_claims[path] = []
             if mod_name not in literal_claims[path]:
@@ -1664,12 +1695,12 @@ func _analyze_script_conflicts() -> void:
             found_literal = true
         _log_critical("CONFLICT: take_over_path(\"" + path + "\") used by: " + ", ".join(mods))
 
-    var extends_claims: Dictionary = { }
+    var extends_claims: Dictionary = {}
     for mod_name: String in _mod_script_analysis:
         var analysis: Dictionary = _mod_script_analysis[mod_name]
         if not analysis["uses_dynamic_override"]:
             continue
-        for path in (analysis["extends_paths"] as Array):
+        for path: String in (analysis["extends_paths"] as Array):
             if not extends_claims.has(path):
                 extends_claims[path] = []
             if mod_name not in extends_claims[path]:
@@ -1739,11 +1770,11 @@ func _print_conflict_summary() -> void:
     else:
         _log_info("")
         _log_info("--- Conflicted Paths (last loader wins) ---")
-        for res_path in conflicted_paths:
+        for res_path: String in conflicted_paths:
             var claims: Array = override_registry[res_path]
             var winner: Dictionary = claims[claims.size() - 1]
             _log_warning("CONFLICT: " + res_path)
-            for claim in claims:
+            for claim: Dictionary in claims:
                 var marker: String = " <-- wins" if claim == winner else ""
                 _log_info(
                     "    [" + str(claim["load_index"] + 1) + "] "
@@ -1758,7 +1789,7 @@ func _print_conflict_summary() -> void:
             var lower: String = res_path.to_lower()
             if not (lower.ends_with(".tscn") or lower.ends_with(".scn")):
                 continue
-            for claim in (override_registry[res_path] as Array):
+            for claim: Dictionary in (override_registry[res_path] as Array):
                 var cn: String = claim["mod_name"]
                 if cn != _database_replaced_by and cn not in affected:
                     affected.append(cn)
@@ -1776,7 +1807,7 @@ func _write_conflict_report() -> void:
     if f == null:
         _log_warning("Could not write report to: " + CONFLICT_REPORT_PATH)
         return
-    for line in _report_lines:
+    for line: String in _report_lines:
         f.store_line(line)
     f.close()
     print("[ModLoader][Info] Conflict report written to: " + CONFLICT_REPORT_PATH)
@@ -1785,33 +1816,106 @@ func _write_conflict_report() -> void:
 
 
 func _instantiate_autoload(mod_name: String, autoload_name: String, res_path: String) -> void:
-    if not (FileAccess.file_exists(res_path) or ResourceLoader.exists(res_path)):
-        _log_critical("Autoload not found: " + res_path + " [" + mod_name + "]")
+    _instantiate_autoload_safe({"mod_name": mod_name, "name": autoload_name, "path": res_path})
+
+
+# Split into 4 deterministic phases (resolve / construct / attach / register).
+# Each phase has null guards + early bail with push_error. Phase split locked
+# in 2026-04-25 — splitting them into separate helpers (rather than inline)
+# was the difference between silent crashes and a working _enter_tree path.
+func _instantiate_autoload_safe(entry: Dictionary) -> void:
+    var mod_name: String = entry.get("mod_name", "<unknown_mod>")
+    var autoload_name: String = entry.get("name", "<unknown_autoload>")
+    var res_path: String = entry.get("path", "")
+
+    var resource: Resource = _resolve_autoload_resource(res_path, autoload_name, mod_name)
+    if resource == null:
+        return
+    var node: Node = _construct_autoload_node(resource, autoload_name)
+    if node == null:
+        return
+    if not _attach_autoload_to_root(node, autoload_name):
+        return
+    if not _register_autoload_singleton(node, autoload_name, mod_name):
         return
 
+
+func _resolve_autoload_resource(res_path: String, autoload_name: String, mod_name: String) -> Resource:
+    if res_path.is_empty():
+        push_error("[ML] resolve: empty res_path for %s" % autoload_name)
+        return null
+    if not (FileAccess.file_exists(res_path) or ResourceLoader.exists(res_path)):
+        push_error("[ML] resolve: missing on disk %s [%s]" % [res_path, mod_name])
+        _log_critical("Autoload not found: " + res_path + " [" + mod_name + "]")
+        return null
     var resource: Resource = load(res_path)
     if resource == null:
+        push_error("[ML] resolve: load() returned null %s -> %s" % [autoload_name, res_path])
         _log_critical("Autoload failed to parse: " + autoload_name + " -> " + res_path)
-        return
+        return null
+    return resource
 
+
+func _construct_autoload_node(resource: Resource, autoload_name: String) -> Node:
+    if resource == null:
+        push_error("[ML] construct: resource null for %s" % autoload_name)
+        return null
     if resource is PackedScene:
         var instance: Node = (resource as PackedScene).instantiate()
+        if instance == null:
+            push_error("[ML] construct: PackedScene.instantiate() returned null %s" % autoload_name)
+            return null
         instance.name = autoload_name
-        add_child(instance)
-        _log_info("Autoload instantiated (scene): " + autoload_name + " [" + mod_name + "]")
-        return
-
+        return instance
     if resource is GDScript:
         var inst: Variant = (resource as GDScript).new()
         if inst == null:
-            _log_warning("Autoload script returned null: " + autoload_name)
-            return
-        if inst is Node:
-            (inst as Node).name = autoload_name
-            add_child(inst as Node)
-            _log_info("Autoload instantiated (script): " + autoload_name + " [" + mod_name + "]")
-            return
-        _log_warning("Autoload is not a Node — not added to tree: " + autoload_name)
+            push_error("[ML] construct: GDScript.new() returned null %s" % autoload_name)
+            return null
+        if not inst is Node:
+            push_warning("[ML] construct: instance not a Node — %s" % autoload_name)
+            return null
+        (inst as Node).name = autoload_name
+        return inst as Node
+    push_warning("[ML] construct: unsupported resource type %s for %s" % [resource.get_class(), autoload_name])
+    return null
+
+
+# Defer add_child via classic Object.call_deferred("add_child", node) form.
+# add_child.call_deferred(node) Callable form silent-crashed in our testing
+# (Wine/RTV-specific, repro 2026-04-25); classic form is reliable.
+func _attach_autoload_to_root(node: Node, autoload_name: String) -> bool:
+    if node == null:
+        push_error("[ML] attach: node null (%s)" % autoload_name)
+        return false
+    var tree: SceneTree = get_tree()
+    if tree == null:
+        push_error("[ML] attach: SceneTree unavailable (%s)" % autoload_name)
+        return false
+    var root: Window = tree.root
+    if root == null:
+        push_error("[ML] attach: root Window unavailable (%s)" % autoload_name)
+        return false
+    root.call_deferred("add_child", node)
+    return true
+
+
+# Separated from attach so corruption boundary is identifiable. Singleton does
+# not need tree presence — registration succeeds even if add_child still pending.
+# Note: Engine.register_singleton is RUNTIME-ONLY. GDScript parser does NOT
+# consult Engine singletons at parse time. Mods cannot bare-reference these
+# names — shadow var pattern still required (verified 2026-04-25).
+func _register_autoload_singleton(node: Node, autoload_name: String, mod_name: String) -> bool:
+    if node == null:
+        push_error("[ML] register: node null (%s)" % autoload_name)
+        return false
+    if autoload_name.is_empty():
+        push_error("[ML] register: empty autoload_name")
+        return false
+    Engine.register_singleton(autoload_name, node)
+    registered_autoload_names[autoload_name] = node
+    _log_info("Autoload instantiated: " + autoload_name + " [" + mod_name + "]")
+    return true
 
 # ─── Mount helper ─────────────────────────────────────────────────────────────
 
@@ -1858,7 +1962,7 @@ func _compare_versions(a: String, b: String) -> int:
     var pa: PackedStringArray = a.split("-")[0].split(".")
     var pb: PackedStringArray = b.split("-")[0].split(".")
     var n: int = max(pa.size(), pb.size())
-    for i in n:
+    for i: int in n:
         var va: int = int(pa[i]) if i < pa.size() and pa[i].is_valid_int() else 0
         var vb: int = int(pb[i]) if i < pb.size() and pb[i].is_valid_int() else 0
         if va < vb:
@@ -1869,8 +1973,8 @@ func _compare_versions(a: String, b: String) -> int:
 
 
 func _fetch_latest_modworkshop_versions(ids: Array[int]) -> Dictionary:
-    var latest_versions: Dictionary = { }
-    for chunk_ids in _chunk_int_array(ids, 100):
+    var latest_versions: Dictionary = {}
+    for chunk_ids: Array in _chunk_int_array(ids, 100):
         var req: HTTPRequest = HTTPRequest.new()
         req.timeout = 15.0
         add_child(req)
@@ -1878,7 +1982,7 @@ func _fetch_latest_modworkshop_versions(ids: Array[int]) -> Dictionary:
             MODWORKSHOP_VERSIONS_URL,
             PackedStringArray(["Content-Type: application/json", "Accept: application/json"]),
             HTTPClient.METHOD_POST,
-            JSON.stringify({ "mod_ids": chunk_ids }),
+            JSON.stringify({"mod_ids": chunk_ids}),
         )
         if err != OK:
             req.queue_free()
@@ -1898,7 +2002,7 @@ func _fetch_latest_modworkshop_versions(ids: Array[int]) -> Dictionary:
 func _chunk_int_array(arr: Array[int], size: int) -> Array:
     var result: Array = []
     var current: Array[int] = []
-    for value in arr:
+    for value: int in arr:
         current.append(value)
         if current.size() >= size:
             result.append(current)
