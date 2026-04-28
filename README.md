@@ -1,156 +1,30 @@
-# RTV Mod Loader
+# RTV Mod Loader — DEPRECATED (2026-04-26)
 
-A GDScript mod loader for [Road to Vostok](https://store.steampowered.com/app/1963610/Road_to_Vostok/) (Godot 4.6). Loads `.vmz`, `.zip`, and `.pck` mod archives at runtime with an in-game mod manager UI.
+This loader is **no longer maintained**. Use [**vostok-mod-loader**](https://github.com/ametrocavich/vostok-mod-loader) instead.
 
-## Features
+## Why deprecated
 
-- Loads mod archives from a `mods/` directory next to the game executable
-- `mod.txt` manifest for mod metadata and autoload declarations
-- `take_over_path` script patching with conflict detection
-- In-game mod manager (enable/disable, load order, conflict summary)
-- Mod compatibility analysis (lifecycle super() checks, script conflicts)
-- Auto-update checking via ModWorkshop API
+vostok-mod-loader (community fork, MIT) solves the problems this loader was working around:
 
-## Installation
+- **Hook API** (`hook(name, cb)`, `add_hook(path, method, cb)`) — no more whole-script `take_over_path`. Mods intercept individual vanilla methods pre/post/replace/callback.
+- **Source rewriting** via GDSC detokenization — rewritten vanilla scripts ship at original paths, no class_name corruption (Godot bug #83542).
+- **Two-pass boot** + static-init mount — solves autoload-pinning before mod scripts can run.
+- **Crash recovery + safe mode** — heartbeat, restart counter, sentinel files.
+- **Wider compat surface** — godot-mod-loader and tetrahydroc RTVModLib API mirrors.
+- **Modular source** + wiki — 20-file split + per-subsystem rationale.
 
-### Windows
+This loader = ~2000-line monolith with `take_over_path` only and ModWorkshop browse-tab. Not enough to compete.
 
-1. Copy `override.cfg` and `modloader.gd` into the **game install directory**:
-   ```
-   C:\Program Files (x86)\Steam\steamapps\common\Road to Vostok\
-   ```
-   > Right-click the game in Steam > Manage > Browse Local Files to find the directory.
-2. Create a `mods` folder in the game install directory if it doesn't exist.
-3. Launch the game through Steam. You should see the **RTV Mod Loader** button in the top-left corner.
+## Migration
 
-### Linux (Proton)
+If you're a mod author shipping against this loader: declare hook callbacks via `Engine.get_meta("RTVModLib")` after `await lib.frameworks_ready`. See the loader's [Hooks wiki page](https://github.com/ametrocavich/vostok-mod-loader/wiki/Hooks).
 
-> Launch the game once through Steam first to create the Proton prefix.
+If you're an end user: delete `modloader.gd` + `override.cfg` from your game dir, install vostok-mod-loader from its [Releases](https://github.com/ametrocavich/vostok-mod-loader/releases), then drop your mods back into `mods/`.
 
-1. Copy `override.cfg` and `modloader.gd` into the **game install directory**:
-   ```
-   ~/.local/share/Steam/steamapps/common/Road to Vostok/
-   ```
-2. Create a `mods` folder:
-   ```bash
-   mkdir -p ~/.local/share/Steam/steamapps/common/Road\ to\ Vostok/mods
-   ```
-3. Launch the game through Steam.
+## RTV-Coop status
 
-### Directory layout
+The Road to Vostok co-op mod migrated to vostok-mod-loader on 2026-04-26. Install instructions: [RTV-Coop INSTALLATION.md](https://github.com/plaught-armor/RTV-Coop/blob/main/INSTALLATION.md).
 
-```
-Road to Vostok/
-  RTV.exe
-  RTV.pck
-  override.cfg          <- RTV Mod Loader
-  modloader.gd          <- RTV Mod Loader
-  mods/                 <- mod archives go here
-    my-mod.vmz
-    another-mod.zip
-```
+## License
 
-## Creating a Mod
-
-### Archive format
-
-Mods are packaged as `.vmz` (renamed `.zip`) or `.zip` archives. The archive must contain a `mod.txt` at the root.
-
-### mod.txt
-
-```ini
-[mod]
-name="My Mod"
-id="my-mod"
-version="1.0.0"
-
-[autoload]
-MyModManager="res://mymod/autoload/manager.gd"
-```
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Display name shown in the mod manager |
-| `id` | Yes | Unique identifier (used for duplicate detection) |
-| `version` | No | Semantic version string |
-| `priority` | No | Load order (lower = earlier, default 0) |
-
-### Autoloads
-
-The `[autoload]` section declares scripts or scenes to instantiate and add to the scene tree at startup. Each entry maps a node name to a `res://` path inside the archive.
-
-```ini
-[autoload]
-MyManager="res://mymod/manager.gd"
-```
-
-The loader will:
-1. Mount the archive into `res://`
-2. Load and instantiate the script/scene
-3. Add it to the root as a named node
-
-### Script patching with take_over_path
-
-To override a game script, create a patch script that extends the original:
-
-```gdscript
-extends "res://Scripts/Door.gd"
-
-func Interact():
-    # Custom behavior
-    super.Interact()
-```
-
-Then in your autoload, register the patch:
-
-```gdscript
-func _ready():
-    var patch = load("res://mymod/patches/door_patch.gd")
-    patch.take_over_path("res://Scripts/Door.gd")
-```
-
-The mod loader detects `take_over_path` calls and will warn about conflicts if multiple mods try to patch the same script.
-
-### Archive structure
-
-Files in the archive map directly to `res://` paths:
-
-```
-mod.txt                         -> read by loader (not mounted)
-mymod/autoload/manager.gd      -> res://mymod/autoload/manager.gd
-mymod/patches/door_patch.gd    -> res://mymod/patches/door_patch.gd
-```
-
-## Mod Manager UI
-
-Click the **RTV Mod Loader** button in the top-left corner to open the mod manager. From here you can:
-
-- Enable/disable individual mods
-- View load order and adjust priority
-- See conflict warnings and compatibility analysis
-- Check for mod updates (ModWorkshop-hosted mods)
-
-## Uninstalling
-
-Delete `override.cfg` and `modloader.gd` from the game install directory.
-
-## Troubleshooting
-
-### Game won't start after installing
-
-- Verify both `override.cfg` and `modloader.gd` are in the game directory (next to `RTV.exe`)
-- Try removing all mods from `mods/` to confirm the loader itself works
-
-### Mod not loading
-
-- Check that the `.vmz`/`.zip` contains a valid `mod.txt` at the root
-- Check the game log for `[ModLoader]` messages:
-  - **Windows:** `%APPDATA%\Road to Vostok\logs\godot.log`
-  - **Linux:** `~/.local/share/Steam/steamapps/compatdata/1963610/pfx/drive_c/users/steamuser/AppData/Roaming/Road to Vostok/logs/godot.log`
-
-### Conflict warnings
-
-The loader warns about:
-- **Script conflicts:** Multiple mods patching the same game script via `take_over_path`
-- **Missing super():** Patch scripts that override lifecycle methods without calling `super()`
-- **Database overrides:** Mods that replace `Database.gd` (high risk of breaking item preloads)
+MIT — see [LICENSE](LICENSE). Source archived at last release tag for historical reference.
